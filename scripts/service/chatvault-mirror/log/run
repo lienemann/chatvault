@@ -1,0 +1,6 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# termux-services log redirector. Stores rotated logs under
+# $HOME/.local/state/chatvault/mirror/.
+LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/chatvault/mirror"
+mkdir -p "$LOG_DIR"
+exec svlogd -tt "$LOG_DIR"

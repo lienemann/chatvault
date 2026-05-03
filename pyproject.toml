@@ -1,0 +1,122 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "chatvault"
+version = "0.1.0"
+description = "Local archive of WA chat history with structured queries and exports"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "chatvault contributors" }]
+requires-python = ">=3.11"
+keywords = ["chat", "archive", "personal-data", "sqlite"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Chat",
+    "Topic :: System :: Archiving",
+    "Typing :: Typed",
+]
+dependencies = [
+    "typer>=0.12",
+    "rich>=13",
+]
+
+[project.optional-dependencies]
+decrypt = ["wa-crypt-tools>=0.1"]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "types-setuptools",
+]
+
+[project.scripts]
+chatvault = "chatvault.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/chatvault/chatvault"
+Repository = "https://github.com/chatvault/chatvault"
+Issues = "https://github.com/chatvault/chatvault/issues"
+Changelog = "https://github.com/chatvault/chatvault/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/chatvault"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/chatvault",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",      # pycodestyle + pyflakes
+    "I",                # isort
+    "B",                # bugbear
+    "UP",               # pyupgrade
+    "SIM",              # simplify
+    "TID",              # tidy imports
+    "RUF",              # ruff-specific
+    "PT",               # pytest style
+    "PL",               # pylint subset
+]
+ignore = [
+    "PLR0913",          # too many args — fine for builders
+    "PLR2004",          # magic numbers — fine in DB code
+    "E501",             # line length handled by formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["PLR2004", "S101"]
+"src/chatvault/migrations/**" = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_configs = true
+warn_unreachable = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+no_implicit_optional = true
+ignore_missing_imports = true
+files = ["src/chatvault"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["src/chatvault"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]

@@ -1,0 +1,10 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# termux-services run script for the media mirror daemon.
+# Install with:
+#   pkg install termux-services inotify-tools
+#   mkdir -p ~/.config/sv/chatvault-mirror
+#   cp run ~/.config/sv/chatvault-mirror/run
+#   chmod +x ~/.config/sv/chatvault-mirror/run
+#   sv-enable chatvault-mirror
+exec 2>&1
+exec chatvault mirror start

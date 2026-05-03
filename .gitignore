@@ -1,0 +1,71 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Tests / coverage
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+htmlcov/
+.hypothesis/
+coverage.xml
+*.cover
+.mypy_cache/
+.ruff_cache/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+.python-version
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local data — these would contain private chat content
+/data/
+/staging/
+/archive.db
+/archive.db-journal
+/archive.db-wal
+/archive.db-shm
+*.sqlite
+*.db
+
+# Sample fixtures keep their .db files
+!tests/fixtures/*.db
+
+# Backups and keys
+*.crypt15
+*.crypt14
+.wa-key
+*.key
+
+# OS
+.DS_Store
+Thumbs.db
