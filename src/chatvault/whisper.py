@@ -234,6 +234,7 @@ def whisper_cli_version(whisper_cli: str) -> str | None:
             check=False,
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=5,
             env=_subprocess_env_for(whisper_cli),
         )
@@ -258,7 +259,7 @@ def _decode_to_wav(ffmpeg: str, src: Path, dst: Path) -> None:
         "wav",
         str(dst),
     ]
-    res = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    res = subprocess.run(cmd, check=False, capture_output=True, text=True, errors="replace")
     if res.returncode != 0:
         msg = f"ffmpeg failed for {src}: {res.stderr.strip()[:200]}"
         raise RuntimeError(msg)
@@ -293,6 +294,7 @@ def _run_whisper_batch(
         check=False,
         capture_output=True,
         text=True,
+        errors="replace",
         env=_subprocess_env_for(whisper_cli),
     )
     if res.returncode != 0:
@@ -307,7 +309,9 @@ def _run_whisper_batch(
         if txt_path is None:
             msg = f"whisper-cli produced no output for {wav}"
             raise RuntimeError(msg)
-        out.append(_strip_timestamps(txt_path.read_text(encoding="utf-8")).strip())
+        out.append(
+            _strip_timestamps(txt_path.read_text(encoding="utf-8", errors="replace")).strip()
+        )
     return out
 
 

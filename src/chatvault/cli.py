@@ -935,6 +935,255 @@ def chat_why(
         console.print(f"  {line}")
 
 
+@chat_app.command("describe-images")
+def chat_describe_images(
+    chat: Annotated[str, typer.Argument(help="Chat name substring or JID.")],
+    last: Annotated[
+        int | None,
+        typer.Option("--last", "-n", help="Restrict to the last N messages in the chat."),
+    ] = None,
+    since: Annotated[
+        str | None,
+        typer.Option("--since", help="Only messages with ts >= this ISO date/timestamp."),
+    ] = None,
+    model: Annotated[
+        str,
+        typer.Option(
+            "--model",
+            "-m",
+            help="claude alias: sonnet (default), opus (deeper nuance), or haiku.",
+        ),
+    ] = "sonnet",
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Re-describe images that already have a row."),
+    ] = False,
+    api_key_env: Annotated[
+        str,
+        typer.Option(
+            "--api-key-env",
+            help=(
+                "Env var holding the Anthropic API key. Use a personal key if your default "
+                "Claude login is on a company-managed account."
+            ),
+        ),
+    ] = "ANTHROPIC_API_KEY",
+    media_root: Annotated[
+        Path,
+        typer.Option(
+            "--media-root", help="Live source media root (falls back when no mirror copy)."
+        ),
+    ] = Path("/sdcard/WhatsApp/Media"),
+) -> None:
+    """Vision-describe image media in a chat (chat screenshots, profiles, memes).
+
+    Skips stickers. Costs ~$0.005/image (sonnet) or ~$0.05/image (opus).
+    Re-runs are idempotent — already-described images are skipped unless --force.
+    """
+    from .image_describe import describe_all, iter_image_candidates
+
+    paths = Paths.default()
+    conn = _open_db(paths)
+    try:
+        chat_jid = _resolve_chat_or_exit(conn, chat)
+        live_root = media_root if media_root.exists() else None
+        total = sum(
+            1
+            for _ in iter_image_candidates(
+                conn, chat_jid=chat_jid, since=since, last=last, force=force
+            )
+        )
+        if total == 0:
+            console.print("[yellow]no image candidates in scope.[/]")
+            return
+        console.print(f"[dim]{total} images to describe (model={model})…[/]")
+        done = {"n": 0}
+
+        def _progress(row, src, status):  # type: ignore[no-untyped-def]
+            done["n"] += 1
+            tag = f"[dim][{done['n']}/{total}][/]"
+            if status.startswith("ok"):
+                console.print(f"  {tag} [green]✓[/] {row.message_id} [dim]{status}[/]")
+            elif status == "missing":
+                console.print(f"  {tag} [yellow]·[/] {row.message_id} [dim](file missing)[/]")
+            else:
+                console.print(f"  {tag} [red]✗[/] {row.message_id} [dim]{status}[/]")
+
+        result = describe_all(
+            conn,
+            paths,
+            model=model,
+            chat_jid=chat_jid,
+            since=since,
+            last=last,
+            force=force,
+            api_key_env=api_key_env,
+            live_media_root=live_root,
+            progress=_progress,
+        )
+    finally:
+        conn.close()
+    console.print(
+        f"[green]✓[/] {result.described}/{result.candidates} described "
+        f"(skipped {result.skipped_missing} missing, {result.failed} failed)"
+    )
+
+
+@chat_app.command("summarize")
+def chat_summarize(
+    chat: Annotated[str, typer.Argument(help="Chat name substring or JID.")],
+    out: Annotated[
+        Path, typer.Option("--out", "-o", help="Output directory.")
+    ] = Path("./summary"),
+    last: Annotated[int, typer.Option("--last", "-n", help="Last N messages.")] = 1000,
+    since: Annotated[
+        str | None,
+        typer.Option("--since", help="Only messages with ts >= this ISO date/timestamp."),
+    ] = None,
+    model: Annotated[
+        str, typer.Option("--model", "-m", help="claude alias: opus (default) or sonnet.")
+    ] = "opus",
+    embed: Annotated[
+        bool,
+        typer.Option(
+            "--embed/--no-embed",
+            help="Copy referenced images into out/media/ so the report is self-contained.",
+        ),
+    ] = True,
+    api_key_env: Annotated[
+        str,
+        typer.Option(
+            "--api-key-env",
+            help=(
+                "Env var holding the Anthropic API key. Use a personal key if your default "
+                "Claude login is on a company-managed account."
+            ),
+        ),
+    ] = "ANTHROPIC_API_KEY",
+    extract_only: Annotated[
+        bool,
+        typer.Option(
+            "--extract-only", help="Skip pass 2; write only extract.json (debugging)."
+        ),
+    ] = False,
+    describe_images: Annotated[
+        bool,
+        typer.Option(
+            "--describe-images/--no-describe-images",
+            help=(
+                "Before pass 1, run vision description on every in-scope image that "
+                "doesn't yet have one (chat screenshots, profiles, memes). "
+                "Cost: ~$0.005/image with sonnet."
+            ),
+        ),
+    ] = False,
+    vision_model: Annotated[
+        str,
+        typer.Option(
+            "--vision-model",
+            help="Model used when --describe-images is on (sonnet|opus|haiku).",
+        ),
+    ] = "sonnet",
+    media_root: Annotated[
+        Path,
+        typer.Option(
+            "--media-root",
+            help="Live source media root, used by --describe-images when no mirror copy exists.",
+        ),
+    ] = Path("/sdcard/WhatsApp/Media"),
+) -> None:
+    """Two-pass LLM summary of a chat via `claude -p --bare`. Default model: opus."""
+    import json as _json
+
+    from .summarize import (
+        collect_image_refs,
+        copy_referenced_media,
+        summarise_chat,
+    )
+
+    paths = Paths.default()
+    # describe-images writes to image_descriptions; summary itself is read-only.
+    conn = _open_db(paths, read_only=not describe_images)
+    try:
+        chat_jid = _resolve_chat_or_exit(conn, chat)
+        if last > 1000:
+            console.print(f"[yellow]warn:[/] --last {last} > 1000; token cost may be high.")
+
+        if describe_images:
+            from .image_describe import describe_all, iter_image_candidates
+
+            live_root = media_root if media_root.exists() else None
+            img_total = sum(
+                1
+                for _ in iter_image_candidates(
+                    conn, chat_jid=chat_jid, since=since, last=last
+                )
+            )
+            if img_total:
+                console.print(
+                    f"[dim]describing {img_total} new images (model={vision_model})…[/]"
+                )
+                img_done = {"n": 0}
+
+                def _img_progress(row, src, status):  # type: ignore[no-untyped-def]
+                    img_done["n"] += 1
+                    tag = f"[dim][{img_done['n']}/{img_total}][/]"
+                    if status.startswith("ok"):
+                        console.print(f"  {tag} [green]✓[/] {row.message_id} [dim]{status}[/]")
+                    elif status == "missing":
+                        console.print(f"  {tag} [yellow]·[/] {row.message_id} [dim](missing)[/]")
+                    else:
+                        console.print(f"  {tag} [red]✗[/] {row.message_id} [dim]{status}[/]")
+
+                describe_all(
+                    conn,
+                    paths,
+                    model=vision_model,
+                    chat_jid=chat_jid,
+                    since=since,
+                    last=last,
+                    api_key_env=api_key_env,
+                    live_media_root=live_root,
+                    progress=_img_progress,
+                )
+
+        console.print(f"[dim]summarising {chat_jid} (last={last}, model={model})…[/]")
+        result = summarise_chat(
+            conn,
+            chat_jid,
+            last=last,
+            since=since,
+            model=model,
+            api_key_env=api_key_env,
+            extract_only=extract_only,
+        )
+        if result.msg_count == 0:
+            console.print("[yellow]no messages in range.[/]")
+            return
+
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "extract.json").write_text(
+            _json.dumps(result.extract, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        if result.markdown:
+            (out / "summary.md").write_text(result.markdown, encoding="utf-8")
+
+        copied = missing = 0
+        if embed:
+            refs = collect_image_refs(result.extract)
+            copied, missing = copy_referenced_media(refs, conn, paths, out)
+    finally:
+        conn.close()
+
+    if result.markdown:
+        console.print(f"[green]✓[/] {out / 'summary.md'} ({result.msg_count} msgs)")
+    else:
+        console.print(f"[green]✓[/] {out / 'extract.json'} ({result.msg_count} msgs, extract only)")
+    if embed:
+        console.print(f"  media/ {copied} files (+{missing} missing on disk)")
+
+
 def _format_media_tag(r: dict[str, Any]) -> str:
     fname = r.get("media_mirrored_path") or r.get("media_file_path")
     mime = r.get("media_mime")
@@ -1536,15 +1785,22 @@ def transcribe(
             console.print(f"\n[dim]{shown} candidate(s)[/]")
             return
 
-        def _progress(row, src, status):  # type: ignore[no-untyped-def]
-            if status == "ok":
-                console.print(f"  [green]✓[/] {row.message_id}")
-            elif status == "missing":
-                console.print(f"  [yellow]·[/] {row.message_id} [dim](file missing)[/]")
-            else:
-                console.print(f"  [red]✗[/] {row.message_id} [dim]{status}[/]")
-
         live_root = media_root if media_root.exists() else None
+        total = sum(
+            1 for _ in iter_audio_candidates(conn, chat_jid=chat_jid, force=force, limit=limit)
+        )
+        done = {"n": 0}
+
+        def _progress(row, src, status):  # type: ignore[no-untyped-def]
+            done["n"] += 1
+            tag = f"[dim][{done['n']}/{total}][/]"
+            if status == "ok":
+                console.print(f"  {tag} [green]✓[/] {row.message_id}")
+            elif status == "missing":
+                console.print(f"  {tag} [yellow]·[/] {row.message_id} [dim](file missing)[/]")
+            else:
+                console.print(f"  {tag} [red]✗[/] {row.message_id} [dim]{status}[/]")
+
         result = transcribe_all(
             conn,
             paths,

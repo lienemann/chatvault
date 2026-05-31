@@ -28,6 +28,23 @@ def _load_whisper_transcripts(
     return {r["message_id"]: dict(r) for r in rows}
 
 
+def _load_image_descriptions(
+    conn: sqlite3.Connection, msg_ids: list[str], placeholders: str
+) -> dict[str, dict[str, Any]]:
+    """Return {message_id: {kind, summary, raw_json}} for any vision-described image."""
+    if not msg_ids:
+        return {}
+    try:
+        rows = conn.execute(
+            f"SELECT message_id, kind, summary, raw_json "
+            f"FROM image_descriptions WHERE message_id IN ({placeholders})",
+            msg_ids,
+        )
+    except sqlite3.OperationalError:
+        return {}
+    return {r["message_id"]: dict(r) for r in rows}
+
+
 def render_digest(
     conn: sqlite3.Connection,
     chat_jid: str,
@@ -89,6 +106,7 @@ def render_digest(
         )
     }
     transcriptions = _load_whisper_transcripts(conn, msg_ids, placeholders)
+    image_descs = _load_image_descriptions(conn, msg_ids, placeholders)
     reactions_by_msg: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for r in conn.execute(
         f"SELECT * FROM reactions WHERE parent_message_id IN ({placeholders})",
@@ -170,6 +188,12 @@ def render_digest(
                 if line.strip():
                     out.append(f"  > {line}  ")
 
+        if idesc := image_descs.get(m["id"]):
+            out.append(f"  _[content: {idesc['kind']}]_  ")
+            for line in (idesc["summary"] or "").splitlines():
+                if line.strip():
+                    out.append(f"  > {line}  ")
+
         if lp := link_previews.get(m["id"]):
             out.append(f"  _[link: {lp['url']}]_  ")
             if lp["title"]:
@@ -239,6 +263,7 @@ def render_digest_jsonl(
     ):
         reactions_by_msg[r["parent_message_id"]].append(dict(r))
     transcriptions = _load_whisper_transcripts(conn, msg_ids, placeholders)
+    image_descs = _load_image_descriptions(conn, msg_ids, placeholders)
 
     resolver = NameResolver(conn)
     lines: list[str] = []
@@ -272,6 +297,16 @@ def render_digest_jsonl(
                 "text": tr["text"],
                 "language": tr["language"],
                 "model": tr["model"],
+            }
+        if idesc := image_descs.get(d["id"]):
+            try:
+                raw = json.loads(idesc["raw_json"])
+            except (TypeError, ValueError):
+                raw = None
+            rec["image_description"] = {
+                "kind": idesc["kind"],
+                "summary": idesc["summary"],
+                "details": raw,
             }
         if q := quoted.get(d["id"]):
             rec["quoted"] = {
