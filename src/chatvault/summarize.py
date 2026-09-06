@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import sqlite3
 import subprocess
 from dataclasses import dataclass, field
@@ -21,6 +20,7 @@ from typing import Any
 
 from chatvault.config import Paths
 from chatvault.exports.digest import render_digest_jsonl
+from chatvault.fs import link_or_copy
 
 PASS1_SYSTEM = """\
 You receive JSONL of WhatsApp chat messages (one per line, chronological).
@@ -74,13 +74,47 @@ no markdown fences — with exactly these keys:
   "opinions":   [{"topic": str, "majority_view": str,
                   "supporters": [{"name": str, "argument": str}],
                   "dissenters": [{"name": str, "argument": str}]}],
-  "tips":       [{"tip": str, "source": str, "ts": str, "reaction_count": int}],
+  "tips":       [{
+                    "tip": str,                          // verbatim or near-verbatim
+                    "category": "recommendation" | "recipe" | "habit_routine"
+                                | "setting_config" | "shortcut_hack" | "warning_avoid"
+                                | "tool_service" | "place_venue" | "skill_technique"
+                                | "data_point" | "other",
+                    "subject": str,                      // what it concerns (app/book/place/exercise/...)
+                    "source": str,
+                    "ts": str,
+                    "evidence": str | null,              // outcome claim or anecdote attached
+                    "endorsed_by": [str],                // others who later confirmed it worked
+                    "reaction_count": int
+                  }],
   "unresolved": [{"topic": str, "positions": [str], "ts_range": str}]
 }
 
 Rules:
+- Use `sender_name` (and any names inside image_description.details) verbatim
+  throughout. Do NOT pseudonymise, abbreviate, or paraphrase to "the sharer" /
+  "user A". Real names are expected.
 - Drop pure greetings, single-word agreements, logistics dust ("on my way"),
   duplicated forwards, personal fights — UNLESS a substantive outcome emerged.
+
+TIPS — be liberal. Anything below counts; capture them ALL, not just obvious
+"tips". Each goes into the `tips` array with the matching `category`:
+  • recommendation   — apps, books, podcasts, movies, products, supplements
+  • recipe           — ingredient list / step / technique for cooking, drinks
+  • habit_routine    — daily/weekly practice ("cold shower every morning")
+  • setting_config   — phone/app settings, automation, keyboard shortcuts
+  • shortcut_hack    — lifehack, workaround, clever combination
+  • warning_avoid    — what NOT to do, brands/services to skip, anti-patterns
+  • tool_service     — tool, SaaS, website, command, library, hardware
+  • place_venue      — restaurant, bar, route, hotel, viewpoint, shop
+  • skill_technique  — exercise form, language tactic, study method, drill
+  • data_point       — concrete number/result worth remembering ("I lost 5kg
+                       on X over 8 weeks", "Y costs €40 vs €120 at Z")
+  • other            — useful enough to remember but doesn't fit above
+Capture `subject` precisely (brand/product/place name), `evidence` if the
+sender attached a result or anecdote, and `endorsed_by` for anyone who later
+confirmed it worked. Reactions count as a soft endorsement signal but the
+sender must add value, not just react.
 - Reaction counts are an agreement signal; weight them.
 - A "decision" requires a real resolution. Threads that fizzled or stayed
   contested go in "unresolved", not "decisions".
@@ -114,7 +148,17 @@ input array is empty.
   - Dissenters: <name (1-line arg)>, … or "none"
 
 ## Tips & tricks
-- <tip> — <source>, ts. 👍×N.
+Group items by `category`. Use these subheadings (skip empty groups, in this order):
+"### Recommendations" (recommendation), "### Recipes" (recipe),
+"### Habits & routines" (habit_routine), "### Settings & configs"
+(setting_config), "### Shortcuts & hacks" (shortcut_hack), "### Tools & services"
+(tool_service), "### Places & venues" (place_venue), "### Skills & techniques"
+(skill_technique), "### Data points" (data_point), "### What to avoid"
+(warning_avoid), "### Other" (other).
+
+Per-item line:
+- **<subject>** — <tip>. <evidence if any>. — <source>, ts. 👍×N
+  Endorsed by: <endorsed_by joined with ", "> (omit line if list is empty).
 
 ## Unresolved threads
 - **<topic>** (<ts_range>): <positions joined with " vs ">.
@@ -127,22 +171,66 @@ Rules:
 """
 
 
+CHAT_UI_PROMPT = """\
+You are summarising a WhatsApp chat. The conversation data is attached as
+`data.jsonl` (one message per line). Internally:
+
+  1. extract the structured categories listed in PART 1 (mentally; do not show);
+  2. render the Markdown report in PART 2, using that extract.
+
+Output ONLY the final Markdown — no preamble, no JSON, no fences.
+
+NAMES
+-----
+
+`sender_name` values and any names inside `image_description.details` are
+REAL names from the chat. Use them verbatim. Do NOT pseudonymise, abbreviate
+(e.g. "M.") or paraphrase ("the sharer", "user A", "person 1"). If a name is
+missing or shows as a JID/phone, fall back to that string unchanged.
+
+────────────────────────────  PART 1: EXTRACTION RULES  ────────────────────────────
+
+{pass1}
+
+────────────────────────────  PART 2: REPORT FORMAT  ────────────────────────────
+
+{pass2}
+"""
+
+
+def build_chat_ui_prompt() -> str:
+    """Standalone prompt text (no data) — pair with the data.jsonl attachment
+    when pasting into Claude.ai / ChatGPT."""
+    return CHAT_UI_PROMPT.format(pass1=PASS1_SYSTEM.strip(), pass2=PASS2_SYSTEM.strip())
+
+
+def _resolve_key(api_key_env: str, api_key_file: str | None) -> str:
+    """Prefer env var; fall back to chmod-600 file. Hard-fail on loose perms."""
+    val = os.environ.get(api_key_env, "")
+    if val:
+        return val
+    if api_key_file:
+        from chatvault.config import read_api_key_from_file
+
+        return read_api_key_from_file(Path(os.path.expanduser(api_key_file)))
+    msg = (
+        f"No API key: env var {api_key_env!r} unset and no api_key_file given. "
+        f"Either export ${api_key_env} or set [<section>].api_key_file in config.toml."
+    )
+    raise RuntimeError(msg)
+
+
 def _call_claude(
     prompt: str,
     *,
     model: str,
     system: str,
     api_key_env: str,
+    api_key_file: str | None = None,
     timeout: int = 600,
 ) -> str:
-    """Invoke `claude -p --bare` with an explicit API key from env."""
-    api_key = os.environ.get(api_key_env)
-    if not api_key:
-        msg = (
-            f"environment variable {api_key_env!r} is not set. "
-            "Export an Anthropic API key (personal recommended for company-managed accounts)."
-        )
-        raise RuntimeError(msg)
+    """Invoke `claude -p --bare` with an explicit API key (env or chmod-600 file)."""
+    api_key = _resolve_key(api_key_env, api_key_file)
 
     cmd = [
         "claude",
@@ -169,6 +257,115 @@ def _call_claude(
         msg = f"claude failed (rc={res.returncode}): {stderr[:500]}"
         raise RuntimeError(msg)
     return res.stdout
+
+
+def _call_openai(
+    prompt: str,
+    *,
+    model: str,
+    system: str,
+    base_url: str,
+    api_key_env: str,
+    api_key_file: str | None = None,
+    timeout: int = 600,
+    json_mode: bool = False,
+) -> str:
+    """POST to an OpenAI-compatible /chat/completions endpoint.
+
+    Works with Ollama (`http://localhost:11434/v1`), llama.cpp `server`,
+    LM Studio, vLLM, LocalAI, and OpenAI itself. Local servers usually accept
+    any non-empty bearer token — `api_key_env` may be unset in that case.
+
+    `json_mode=True` requests `response_format={"type": "json_object"}`, which
+    the better local runtimes honour (llama.cpp grammar, vLLM guided JSON).
+    """
+    import urllib.error
+    import urllib.request
+
+    # Local servers usually accept any non-empty token. Only enforce a real key
+    # when a file is configured or the env var holds something.
+    try:
+        api_key = _resolve_key(api_key_env, api_key_file)
+    except RuntimeError:
+        api_key = ""
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0,
+        "stream": False,
+    }
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
+
+    url = base_url.rstrip("/") + "/chat/completions"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key or 'sk-local'}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        msg = f"openai-compat HTTP {exc.code} from {url}: {detail}"
+        raise RuntimeError(msg) from exc
+    except urllib.error.URLError as exc:
+        msg = f"openai-compat could not reach {url}: {exc.reason}"
+        raise RuntimeError(msg) from exc
+
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        msg = f"openai-compat unexpected response shape: {str(data)[:500]}"
+        raise RuntimeError(msg) from exc
+    if not isinstance(content, str):
+        msg = f"openai-compat content is not a string: {type(content).__name__}"
+        raise RuntimeError(msg)
+    return content
+
+
+def _call_llm(
+    prompt: str,
+    *,
+    backend: str,
+    model: str,
+    system: str,
+    api_key_env: str,
+    api_key_file: str | None,
+    base_url: str | None,
+    json_mode: bool = False,
+) -> str:
+    if backend == "claude":
+        return _call_claude(
+            prompt,
+            model=model,
+            system=system,
+            api_key_env=api_key_env,
+            api_key_file=api_key_file,
+        )
+    if backend == "openai":
+        if not base_url:
+            msg = "backend='openai' requires base_url (e.g. http://localhost:11434/v1)"
+            raise RuntimeError(msg)
+        return _call_openai(
+            prompt,
+            model=model,
+            system=system,
+            base_url=base_url,
+            api_key_env=api_key_env,
+            api_key_file=api_key_file,
+            json_mode=json_mode,
+        )
+    msg = f"unknown backend: {backend!r} (expected 'claude' or 'openai')"
+    raise RuntimeError(msg)
 
 
 def _strip_json_fences(text: str) -> str:
@@ -216,16 +413,31 @@ def summarise_chat(
     model: str = "opus",
     api_key_env: str = "ANTHROPIC_API_KEY",
     extract_only: bool = False,
+    backend: str = "claude",
+    base_url: str | None = None,
+    api_key_file: str | None = None,
 ) -> SummaryResult:
-    """Run the two-pass summary. `extract_only=True` skips pass 2 (debugging)."""
+    """Run the two-pass summary. `extract_only=True` skips pass 2 (debugging).
+
+    backend="claude" runs `claude -p --bare`. backend="openai" POSTs to an
+    OpenAI-compatible /chat/completions endpoint (`base_url` required —
+    e.g. http://localhost:11434/v1 for Ollama).
+    """
     jsonl = render_digest_jsonl(conn, chat_jid, last=last)
     jsonl = _filter_jsonl_since(jsonl, since)
     msg_count = sum(1 for line in jsonl.splitlines() if line.strip())
     if msg_count == 0:
         return SummaryResult()
 
-    extract_text = _call_claude(
-        jsonl, model=model, system=PASS1_SYSTEM, api_key_env=api_key_env
+    extract_text = _call_llm(
+        jsonl,
+        backend=backend,
+        model=model,
+        system=PASS1_SYSTEM,
+        api_key_env=api_key_env,
+        api_key_file=api_key_file,
+        base_url=base_url,
+        json_mode=True,
     )
     try:
         extract = json.loads(_strip_json_fences(extract_text))
@@ -235,13 +447,30 @@ def summarise_chat(
 
     markdown = ""
     if not extract_only:
-        markdown = _call_claude(
+        markdown = _call_llm(
             json.dumps(extract, ensure_ascii=False, indent=2),
+            backend=backend,
             model=model,
             system=PASS2_SYSTEM,
             api_key_env=api_key_env,
+            api_key_file=api_key_file,
+            base_url=base_url,
         )
     return SummaryResult(extract=extract, markdown=markdown, msg_count=msg_count)
+
+
+def prepare_chat_ui_bundle(
+    conn: sqlite3.Connection,
+    chat_jid: str,
+    *,
+    last: int = 1000,
+    since: str | None = None,
+) -> tuple[str, str, int]:
+    """Build the chat-UI artefacts. Returns (prompt_text, data_jsonl, msg_count)."""
+    jsonl = render_digest_jsonl(conn, chat_jid, last=last)
+    jsonl = _filter_jsonl_since(jsonl, since)
+    msg_count = sum(1 for line in jsonl.splitlines() if line.strip())
+    return build_chat_ui_prompt(), jsonl, msg_count
 
 
 def collect_image_refs(extract: dict[str, Any]) -> set[str]:
@@ -285,12 +514,6 @@ def copy_referenced_media(
         if not src.exists():
             continue
         dst = media_out / name
-        if dst.exists():
-            copied += 1
-            continue
-        try:
-            os.link(src, dst)
-        except OSError:
-            shutil.copy2(src, dst)
+        link_or_copy(src, dst)
         copied += 1
     return copied, len(refs) - copied

@@ -19,6 +19,7 @@ filtered out — they're noise.
 from __future__ import annotations
 
 import base64
+import io
 import json
 import logging
 import os
@@ -267,13 +268,21 @@ def _now_iso() -> str:
     return datetime.now(tz=UTC).isoformat()
 
 
-def _load_anthropic_client(api_key_env: str) -> Any:
-    """Construct an anthropic.Anthropic client. Late import for optional dep."""
-    api_key = os.environ.get(api_key_env)
+def _load_anthropic_client(api_key_env: str, api_key_file: str | None = None) -> Any:
+    """Construct an anthropic.Anthropic client. Late import for optional dep.
+
+    Resolution: env var first, then chmod-600 file path. The file path comes
+    from ``[anthropic].api_key_file`` in config.toml.
+    """
+    api_key = os.environ.get(api_key_env, "")
+    if not api_key and api_key_file:
+        from chatvault.config import read_api_key_from_file
+
+        api_key = read_api_key_from_file(Path(os.path.expanduser(api_key_file)))
     if not api_key:
         msg = (
-            f"environment variable {api_key_env!r} is not set. "
-            "Export a personal Anthropic API key from console.anthropic.com."
+            f"No API key: env var {api_key_env!r} unset and no api_key_file given. "
+            "Either export the env var or set [anthropic].api_key_file in config.toml."
         )
         raise RuntimeError(msg)
     try:
@@ -298,6 +307,52 @@ def _resolve_model(model: str) -> str:
     return _MODEL_ALIASES.get(model, model)
 
 
+def _resize_for_vision(
+    image_bytes: bytes, mime: str, max_edge: int
+) -> tuple[bytes, str]:
+    """Downscale large images so the vision API charges fewer image tokens.
+
+    Returns possibly-new bytes and a possibly-updated mime. ``max_edge=0``
+    disables resizing. If Pillow isn't installed we skip resizing silently —
+    the API still works, the call just costs more.
+    """
+    if max_edge <= 0:
+        return image_bytes, mime
+    try:
+        from PIL import Image  # type: ignore[import-not-found]
+    except ImportError:
+        log.warning("Pillow not installed; --max-edge ignored")
+        return image_bytes, mime
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        img.load()
+    except Exception as exc:  # corrupt jpeg etc.
+        log.warning("could not open image for resize: %s", exc)
+        return image_bytes, mime
+    w, h = img.size
+    longest = max(w, h)
+    if longest <= max_edge:
+        return image_bytes, mime
+    scale = max_edge / longest
+    new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+    resized = img.resize(new_size, Image.Resampling.LANCZOS)
+    # Pick an output format that re-encodes cheaply. JPEG for non-alpha;
+    # PNG for anything with alpha to avoid black-flatten artifacts.
+    has_alpha = resized.mode in ("RGBA", "LA") or (
+        resized.mode == "P" and "transparency" in resized.info
+    )
+    buf = io.BytesIO()
+    if has_alpha:
+        resized.save(buf, format="PNG", optimize=True)
+        out_mime = "image/png"
+    else:
+        if resized.mode != "RGB":
+            resized = resized.convert("RGB")
+        resized.save(buf, format="JPEG", quality=85, optimize=True)
+        out_mime = "image/jpeg"
+    return buf.getvalue(), out_mime
+
+
 def _describe_one(
     client: Any,
     *,
@@ -306,9 +361,11 @@ def _describe_one(
     model: str,
     poster_hint: str,
     chat_context: str,
+    max_edge: int = 1024,
     max_tokens: int = 3072,
 ) -> dict[str, Any]:
     """Single vision call. Returns parsed JSON dict."""
+    image_bytes, mime = _resize_for_vision(image_bytes, mime, max_edge)
     b64 = base64.standard_b64encode(image_bytes).decode("ascii")
     user_prompt = (
         f"The person who shared this image is: {poster_hint}.\n"
@@ -386,11 +443,13 @@ def describe_all(
     last: int | None = None,
     force: bool = False,
     api_key_env: str = "ANTHROPIC_API_KEY",
+    api_key_file: str | None = None,
     live_media_root: Path | None = None,
+    max_edge: int = 1024,
     progress: ProgressCb | None = None,
 ) -> DescribeResult:
     """Describe every image in scope that doesn't yet have a row in image_descriptions."""
-    client = _load_anthropic_client(api_key_env)
+    client = _load_anthropic_client(api_key_env, api_key_file)
     result = DescribeResult()
 
     candidates = list(
@@ -420,6 +479,7 @@ def describe_all(
                 model=model,
                 poster_hint=row.sender_name,
                 chat_context=row.caption or "",
+                max_edge=max_edge,
             )
         except Exception as exc:  # network / API / JSON errors all funnel here
             log.warning("describe failed for %s: %s", row.message_id, exc)

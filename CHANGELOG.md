@@ -25,6 +25,14 @@
 - Second source app: decrypt and extract Signal Android backups
   (`chatvault signal extract`), including attachments.
 
+- Read API keys from a chmod-600 file named in `config.toml` instead of
+  requiring an env var, and refuse a key file with loose permissions.
+- Summarise against any OpenAI-compatible endpoint (`--backend openai
+  --base-url ...`, e.g. Ollama or llama.cpp), or skip the API entirely
+  with `--prepare`, which writes a prompt.md + data.jsonl bundle to
+  paste into a web chat UI.
+- Down-scale images before vision calls (`--max-edge`, default 1024).
+
 Initial public release. SQLite schema (`migrations/001_init.sql`),
 incremental extract pipeline, identity resolver with vCard import, the
 usual queries (digest, search, timeline, links, forgotten, members,

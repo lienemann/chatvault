@@ -14,7 +14,7 @@ from rich.console import Console
 from rich.table import Table
 
 from . import __version__
-from .config import Paths, read_key, write_key
+from .config import Paths, Settings, read_key, write_key
 from .db import SchemaTooNewError, init_db
 
 app = typer.Typer(
@@ -1000,6 +1000,16 @@ def chat_describe_images(
             "--media-root", help="Live source media root (falls back when no mirror copy)."
         ),
     ] = Path("/sdcard/WhatsApp/Media"),
+    max_edge: Annotated[
+        int,
+        typer.Option(
+            "--max-edge",
+            help=(
+                "Down-scale each image so its longest edge is at most this many pixels "
+                "before sending. Cuts vision token cost ~5×. 0 disables resizing."
+            ),
+        ),
+    ] = 1024,
 ) -> None:
     """Vision-describe image media in a chat (chat screenshots, profiles, memes).
 
@@ -1007,6 +1017,9 @@ def chat_describe_images(
     Re-runs are idempotent — already-described images are skipped unless --force.
     """
     from .image_describe import describe_all, iter_image_candidates
+
+    settings = Settings.load(Paths.default().config_dir)
+    api_key_file = settings.get("anthropic", "api_key_file")
 
     paths = Paths.default()
     conn = _open_db(paths)
@@ -1044,7 +1057,9 @@ def chat_describe_images(
             last=last,
             force=force,
             api_key_env=api_key_env,
+            api_key_file=api_key_file,
             live_media_root=live_root,
+            max_edge=max_edge,
             progress=_progress,
         )
     finally:
@@ -1067,8 +1082,39 @@ def chat_summarize(
         typer.Option("--since", help="Only messages with ts >= this ISO date/timestamp."),
     ] = None,
     model: Annotated[
-        str, typer.Option("--model", "-m", help="claude alias: opus (default) or sonnet.")
+        str,
+        typer.Option(
+            "--model",
+            "-m",
+            help=(
+                "Model id. For --backend claude: alias 'opus' (default) or 'sonnet'. "
+                "For --backend openai: server-specific id (e.g. 'qwen2.5:7b-instruct-q4_K_M' "
+                "on Ollama, 'gpt-4o-mini' on OpenAI proper)."
+            ),
+        ),
     ] = "opus",
+    backend: Annotated[
+        str,
+        typer.Option(
+            "--backend",
+            help=(
+                "Summarisation backend: 'claude' (default, uses `claude -p --bare`) "
+                "or 'openai' (any OpenAI-compatible /chat/completions endpoint — "
+                "Ollama, llama.cpp server, vLLM, LM Studio, OpenAI itself)."
+            ),
+        ),
+    ] = "claude",
+    base_url: Annotated[
+        str | None,
+        typer.Option(
+            "--base-url",
+            help=(
+                "OpenAI-compatible base URL, used when --backend openai. "
+                "Examples: http://localhost:11434/v1 (Ollama), "
+                "http://localhost:8080/v1 (llama.cpp), https://api.openai.com/v1."
+            ),
+        ),
+    ] = None,
     embed: Annotated[
         bool,
         typer.Option(
@@ -1081,8 +1127,9 @@ def chat_summarize(
         typer.Option(
             "--api-key-env",
             help=(
-                "Env var holding the Anthropic API key. Use a personal key if your default "
-                "Claude login is on a company-managed account."
+                "Env var holding the API key. Anthropic key for --backend claude; "
+                "OpenAI/local key for --backend openai (local servers usually accept "
+                "any non-empty value, so the env var may be unset)."
             ),
         ),
     ] = "ANTHROPIC_API_KEY",
@@ -1090,6 +1137,16 @@ def chat_summarize(
         bool,
         typer.Option(
             "--extract-only", help="Skip pass 2; write only extract.json (debugging)."
+        ),
+    ] = False,
+    prepare: Annotated[
+        bool,
+        typer.Option(
+            "--prepare",
+            help=(
+                "Skip the API entirely; emit a self-contained prompt.md ready to paste "
+                "into a web chat UI (Claude.ai, ChatGPT). No API key needed."
+            ),
         ),
     ] = False,
     describe_images: Annotated[
@@ -1117,23 +1174,63 @@ def chat_summarize(
             help="Live source media root, used by --describe-images when no mirror copy exists.",
         ),
     ] = Path("/sdcard/WhatsApp/Media"),
+    max_edge: Annotated[
+        int,
+        typer.Option(
+            "--max-edge",
+            help="Down-scale images for --describe-images. 0 disables. Default: 1024.",
+        ),
+    ] = 1024,
 ) -> None:
-    """Two-pass LLM summary of a chat via `claude -p --bare`. Default model: opus."""
+    """Two-pass LLM summary of a chat via `claude -p --bare`. Default model: opus.
+
+    With --prepare: skip the API entirely and emit prompt.md for pasting into
+    a web chat UI. Useful when you don't have a personal API key but do have
+    a Claude.ai / ChatGPT subscription.
+    """
     import json as _json
 
     from .summarize import (
         collect_image_refs,
         copy_referenced_media,
+        prepare_chat_ui_bundle,
         summarise_chat,
     )
 
     paths = Paths.default()
-    # describe-images writes to image_descriptions; summary itself is read-only.
+    settings = Settings.load(paths.config_dir)
+    section = "openai" if backend == "openai" else "anthropic"
+    api_key_file = settings.get(section, "api_key_file")
+    vision_api_key_file = settings.get("anthropic", "api_key_file")
+    # describe-images writes to image_descriptions; everything else is read-only.
     conn = _open_db(paths, read_only=not describe_images)
     try:
         chat_jid = _resolve_chat_or_exit(conn, chat)
         if last > 1000:
             console.print(f"[yellow]warn:[/] --last {last} > 1000; token cost may be high.")
+
+        if prepare:
+            prompt_text, data_jsonl, msg_count = prepare_chat_ui_bundle(
+                conn, chat_jid, last=last, since=since
+            )
+            if msg_count == 0:
+                console.print("[yellow]no messages in range.[/]")
+                return
+            out.mkdir(parents=True, exist_ok=True)
+            prompt_path = out / "prompt.md"
+            data_path = out / "data.jsonl"
+            prompt_path.write_text(prompt_text, encoding="utf-8")
+            data_path.write_text(data_jsonl, encoding="utf-8")
+            est_tokens = (len(prompt_text) + len(data_jsonl)) // 4
+            console.print(f"[green]✓[/] {prompt_path}")
+            console.print(
+                f"[green]✓[/] {data_path} ({msg_count} msgs, ~{est_tokens:,} tokens combined)"
+            )
+            console.print(
+                "[dim]Open Claude.ai (Opus, 200k context). Attach data.jsonl, paste "
+                "prompt.md as the message. For images without descriptions, attach them too.[/]"
+            )
+            return
 
         if describe_images:
             from .image_describe import describe_all, iter_image_candidates
@@ -1169,11 +1266,27 @@ def chat_summarize(
                     since=since,
                     last=last,
                     api_key_env=api_key_env,
+                    api_key_file=vision_api_key_file,
                     live_media_root=live_root,
+                    max_edge=max_edge,
                     progress=_img_progress,
                 )
 
-        console.print(f"[dim]summarising {chat_jid} (last={last}, model={model})…[/]")
+        if backend not in ("claude", "openai"):
+            err_console.print(
+                f"[red]--backend must be 'claude' or 'openai' (got {backend!r}).[/]"
+            )
+            raise typer.Exit(code=2)
+        if backend == "openai" and not base_url:
+            err_console.print(
+                "[red]--backend openai requires --base-url "
+                "(e.g. http://localhost:11434/v1 for Ollama).[/]"
+            )
+            raise typer.Exit(code=2)
+
+        console.print(
+            f"[dim]summarising {chat_jid} (last={last}, backend={backend}, model={model})…[/]"
+        )
         result = summarise_chat(
             conn,
             chat_jid,
@@ -1181,7 +1294,10 @@ def chat_summarize(
             since=since,
             model=model,
             api_key_env=api_key_env,
+            api_key_file=api_key_file,
             extract_only=extract_only,
+            backend=backend,
+            base_url=base_url,
         )
         if result.msg_count == 0:
             console.print("[yellow]no messages in range.[/]")
