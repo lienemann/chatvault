@@ -14,6 +14,9 @@
 - Keep resolving names for contacts deleted from the address book, using
   the last `set` row in `contacts_history` as a fallback.
 
+- Every chat and message carries a `source` column naming the app it came
+  from, backfilled to `'whatsapp'` for existing rows (schema v4).
+
 Initial public release. SQLite schema (`migrations/001_init.sql`),
 incremental extract pipeline, identity resolver with vCard import, the
 usual queries (digest, search, timeline, links, forgotten, members,
