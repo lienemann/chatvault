@@ -44,7 +44,8 @@ def synthetic_source(tmp_path: Path) -> sqlite3.Connection:
             _id INTEGER PRIMARY KEY,
             chat_row_id INTEGER, from_me INTEGER, key_id TEXT,
             sender_jid_row_id INTEGER, timestamp INTEGER, received_timestamp INTEGER,
-            message_type INTEGER, text_data TEXT, starred INTEGER, status INTEGER, origin INTEGER
+            message_type INTEGER, text_data TEXT, starred INTEGER, status INTEGER, origin INTEGER,
+            translated_text TEXT
         );
         CREATE TABLE message_media (
             message_row_id INTEGER PRIMARY KEY,

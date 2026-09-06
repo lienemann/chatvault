@@ -33,6 +33,11 @@
   paste into a web chat UI.
 - Down-scale images before vision calls (`--max-edge`, default 1024).
 
+- Store WhatsApp's own message translations (`messages.translated_text`,
+  schema v6) and back-fill voice-note transcripts written into an
+  already archived message, both via the new full-sweep `translations`
+  extractor.
+
 Initial public release. SQLite schema (`migrations/001_init.sql`),
 incremental extract pipeline, identity resolver with vCard import, the
 usual queries (digest, search, timeline, links, forgotten, members,

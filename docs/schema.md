@@ -45,6 +45,14 @@ changes — derived from snapshots, from `group_past_participant_user`, and
 `messages` is the central table. Messages of type `'system'` exist as stub
 rows in `messages` and have their detail in `system_events`.
 
+`messages.translated_text` holds WhatsApp's own in-app translation of the
+message, when the user ever asked for one. It sits next to the untouched
+original in `messages.text` — a translation is a derived artefact, and the app
+may regenerate it. Both it and a late voice-note transcript arrive long after
+the message row was first archived, so they are back-filled by the
+`translations` extractor, which sweeps the whole source table on every run
+instead of following the `last_message_rowid` watermark.
+
 Side tables are 1:1 (or 1:N for mentions/vcards/transcription_segments) and
 key on `message_id`:
 

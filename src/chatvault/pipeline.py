@@ -32,6 +32,7 @@ from .extractors import (
     system_events,
     templates,
     transcriptions,
+    translations,
     vcards,
 )
 
@@ -56,6 +57,7 @@ DEFAULT_EXTRACTORS: list[tuple[str, ExtractorFn]] = [
     ("status_archive_own", status_archive.extract_own),
     ("newsletter", newsletter.extract),
     ("transcriptions", transcriptions.extract),
+    ("translations", translations.extract),
     ("vcards", vcards.extract),
     ("bot_messages", bot_messages.extract),
     ("templates", templates.extract),
