@@ -14,7 +14,7 @@ from rich.table import Table
 
 from . import __version__
 from .config import Paths, read_key, write_key
-from .db import init_db
+from .db import SchemaTooNewError, init_db
 
 app = typer.Typer(
     name="chatvault",
@@ -94,15 +94,23 @@ def _setup_logging(verbose: bool) -> None:
 
 
 def _open_db(paths: Paths, *, read_only: bool = False) -> sqlite3.Connection:
-    if read_only:
-        if not paths.db_path.exists():
-            err_console.print(f"[red]No archive at {paths.db_path}. Run `chatvault init` first.[/]")
-            raise typer.Exit(code=2)
-        from .db import connect
+    try:
+        if read_only:
+            if not paths.db_path.exists():
+                err_console.print(
+                    f"[red]No archive at {paths.db_path}. Run `chatvault init` first.[/]"
+                )
+                raise typer.Exit(code=2)
+            from .db import assert_schema_compatible, connect
 
-        return connect(paths.db_path, read_only=True)
-    # Write paths auto-init if missing — useful for `pin` before first `extract`.
-    return init_db(paths.db_path)
+            conn = connect(paths.db_path, read_only=True)
+            assert_schema_compatible(conn)
+            return conn
+        # Write paths auto-init if missing — useful for `pin` before first `extract`.
+        return init_db(paths.db_path)
+    except SchemaTooNewError as exc:
+        err_console.print(f"[red]{exc}[/]")
+        raise typer.Exit(code=2) from None
 
 
 # ---------------------------------------------------------------------------
@@ -187,14 +195,18 @@ def extract(
     paths = Paths.default()
     paths.ensure()
     snap_root = media_root if snapshot_media else None
-    summary = run_pipeline(
-        paths=paths,
-        encrypted_backup=backup,
-        encrypted_status_backup=status_backup,
-        skip_decrypt=skip_decrypt,
-        keep_decrypted=keep_decrypted,
-        snapshot_media_root=snap_root,
-    )
+    try:
+        summary = run_pipeline(
+            paths=paths,
+            encrypted_backup=backup,
+            encrypted_status_backup=status_backup,
+            skip_decrypt=skip_decrypt,
+            keep_decrypted=keep_decrypted,
+            snapshot_media_root=snap_root,
+        )
+    except SchemaTooNewError as exc:
+        err_console.print(f"[red]{exc}[/]")
+        raise typer.Exit(code=2) from None
     console.print(f"[green]✓[/] extract complete in {summary.duration_s:.1f}s")
     for line in summary.lines:
         console.print(f"  {line}")

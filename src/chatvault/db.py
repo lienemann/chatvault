@@ -15,6 +15,14 @@ log = logging.getLogger(__name__)
 MIGRATIONS_PACKAGE = "chatvault.migrations"
 
 
+class SchemaTooNewError(RuntimeError):
+    """Raised when the on-disk schema version is newer than this build supports.
+
+    Protects an older chatvault build from touching a database that has been
+    upgraded by a newer one — column assumptions in queries would silently drift.
+    """
+
+
 def list_migrations() -> list[tuple[int, str]]:
     """Return [(version, filename)] for all migration scripts, sorted ascending."""
     out: list[tuple[int, str]] = []
@@ -37,6 +45,24 @@ def read_migration(name: str) -> str:
     return (resources.files(MIGRATIONS_PACKAGE) / name).read_text(encoding="utf-8")
 
 
+def known_schema_version() -> int:
+    """Highest migration version bundled with this build (0 if none)."""
+    migs = list_migrations()
+    return migs[-1][0] if migs else 0
+
+
+def assert_schema_compatible(conn: sqlite3.Connection) -> None:
+    """Refuse to operate on a database newer than what this build understands."""
+    on_disk = get_schema_version(conn)
+    known = known_schema_version()
+    if on_disk > known:
+        raise SchemaTooNewError(
+            f"database schema_version={on_disk} but this chatvault build only knows "
+            f"up to {known}. Refusing to touch DB to avoid corruption. "
+            "Upgrade chatvault or point at an older archive."
+        )
+
+
 def get_schema_version(conn: sqlite3.Connection) -> int:
     """Read `_meta.schema_version` (defaults to 0 for an uninitialised db)."""
     try:
@@ -55,7 +81,9 @@ def apply_pending_migrations(conn: sqlite3.Connection) -> list[int]:
     """Apply all migrations whose version is greater than the current schema version.
 
     Returns the list of versions applied (empty if up-to-date).
+    Raises SchemaTooNewError if the on-disk schema is ahead of this build.
     """
+    assert_schema_compatible(conn)
     current = get_schema_version(conn)
     applied: list[int] = []
     for version, name in list_migrations():
