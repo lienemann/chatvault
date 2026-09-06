@@ -22,6 +22,9 @@
   in `_orphans/` and re-homed on a later pass. Existing archives keep the
   flat layout until `chatvault mirror migrate` runs (schema v5).
 
+- Second source app: decrypt and extract Signal Android backups
+  (`chatvault signal extract`), including attachments.
+
 Initial public release. SQLite schema (`migrations/001_init.sql`),
 incremental extract pipeline, identity resolver with vCard import, the
 usual queries (digest, search, timeline, links, forgotten, members,

@@ -35,6 +35,10 @@ chatvault key set            # paste the 64-char hex backup key
 chatvault extract --backup ~/storage/.../msgstore.db.crypt15
 chatvault contact sync      # if termux-contact-list is around
 chatvault contact import-vcard ~/storage/downloads/contacts.vcf  # full multi-number import
+
+# Signal (Android backups; tag = source='signal' in the archive)
+SIGNAL_BACKUP_PASSPHRASE='00000 00000 00000 00000 00000 00000' \
+    chatvault signal extract --backup ~/storage/.../signal-2026-06-19.backup
 ```
 
 Then ask things. **Anywhere a chat name is needed, you can pass a group

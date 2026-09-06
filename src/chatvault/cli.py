@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -38,6 +39,11 @@ link_app = typer.Typer(name="link", help="Link extraction.", no_args_is_help=Tru
 status_app = typer.Typer(
     name="status", help="24h status archive (own + received).", no_args_is_help=True
 )
+signal_app = typer.Typer(
+    name="signal",
+    help="Signal Android backup decrypt + extract.",
+    no_args_is_help=True,
+)
 
 app.add_typer(key_app)
 app.add_typer(contact_app)
@@ -45,6 +51,7 @@ app.add_typer(chat_app)
 app.add_typer(mirror_app)
 app.add_typer(link_app)
 app.add_typer(status_app)
+app.add_typer(signal_app)
 
 console = Console()
 err_console = Console(stderr=True)
@@ -1867,6 +1874,131 @@ def transcribe(
         f"[green]✓[/] {result.transcribed}/{result.candidates} transcribed "
         f"(skipped {result.skipped_missing} missing, {result.failed} failed)"
     )
+
+
+@signal_app.command("extract")
+def signal_extract(
+    backup: Annotated[
+        Path | None,
+        typer.Option(
+            "--backup",
+            help="Encrypted Signal .backup file. Omit with --skip-decrypt.",
+        ),
+    ] = None,
+    passphrase: Annotated[
+        str | None,
+        typer.Option(
+            "--passphrase",
+            "-p",
+            help=(
+                "30-digit Signal backup passphrase (spaces optional). If omitted "
+                "and --passphrase-env is unset, you'll be prompted."
+            ),
+        ),
+    ] = None,
+    passphrase_env: Annotated[
+        str,
+        typer.Option(
+            "--passphrase-env",
+            help="Env var holding the passphrase (preferred over --passphrase on shared shells).",
+        ),
+    ] = "SIGNAL_BACKUP_PASSPHRASE",
+    passphrase_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--passphrase-file",
+            help=(
+                "chmod-600 file containing the passphrase (spaces optional — Signal's "
+                "KDF strips them). Overrides [signal].passphrase_file in config.toml."
+            ),
+        ),
+    ] = None,
+    skip_decrypt: Annotated[
+        bool,
+        typer.Option(
+            "--skip-decrypt",
+            help="Reuse an already-decrypted bundle at cache/staging/signal/.",
+        ),
+    ] = False,
+    keep_decrypted: Annotated[
+        bool,
+        typer.Option(
+            "--keep-decrypted", help="Don't delete the staging plaintext DB after extract."
+        ),
+    ] = False,
+    mirror_attachments: Annotated[
+        bool,
+        typer.Option(
+            "--mirror-attachments/--no-mirror-attachments",
+            help="Hardlink/copy decrypted attachments into the archive media dir.",
+        ),
+    ] = True,
+    full_scan: Annotated[
+        bool,
+        typer.Option(
+            "--full-scan",
+            help=(
+                "Ignore the rowid cursor and re-process every message in this backup. "
+                "Use when merging an older backup containing messages that have since "
+                "been deleted; order: oldest backup first, newest last."
+            ),
+        ),
+    ] = False,
+) -> None:
+    """Decrypt + extract a Signal Android backup into the chatvault archive.
+
+    To merge two backups (e.g. an old one with since-deleted messages and a new
+    one): run `signal extract --full-scan` on the OLDEST first, then again on
+    the NEWEST. Both passes use INSERT OR REPLACE keyed on stable message ids,
+    so the newer backup wins on overlapping rows and old-only rows survive.
+    """
+    from .config import read_api_key_from_file
+    from .pipeline import run_signal_pipeline
+
+    paths = Paths.default()
+    paths.ensure()
+    settings = Settings.load(paths.config_dir)
+
+    pw: str | None = passphrase
+    if pw is None and not skip_decrypt:
+        pw = os.environ.get(passphrase_env)
+        if not pw:
+            pw_file = passphrase_file
+            if pw_file is None:
+                cfg_path = settings.get("signal", "passphrase_file")
+                if isinstance(cfg_path, str) and cfg_path.strip():
+                    pw_file = Path(os.path.expanduser(cfg_path))
+            if pw_file is not None:
+                try:
+                    pw = read_api_key_from_file(pw_file)
+                except (FileNotFoundError, PermissionError, ValueError) as exc:
+                    err_console.print(f"[red]{exc}[/]")
+                    raise typer.Exit(code=2) from None
+        if not pw:
+            pw = typer.prompt(
+                "Signal backup passphrase", hide_input=True, default="", show_default=False
+            ).strip()
+            if not pw:
+                err_console.print("[red]No passphrase provided.[/]")
+                raise typer.Exit(code=2)
+
+    try:
+        summary = run_signal_pipeline(
+            paths=paths,
+            encrypted_backup=backup,
+            passphrase=pw,
+            skip_decrypt=skip_decrypt,
+            keep_decrypted=keep_decrypted,
+            mirror_attachments=mirror_attachments,
+            full_scan=full_scan,
+        )
+    except SchemaTooNewError as exc:
+        err_console.print(f"[red]{exc}[/]")
+        raise typer.Exit(code=2) from None
+
+    console.print(f"[green]✓[/] signal extract complete in {summary.duration_s:.1f}s")
+    for line in summary.lines:
+        console.print(f"  {line}")
 
 
 if __name__ == "__main__":

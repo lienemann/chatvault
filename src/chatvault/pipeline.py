@@ -164,6 +164,118 @@ def _resolved_chat_deltas(
     return deltas
 
 
+@dataclass(slots=True)
+class SignalPipelineSummary:
+    duration_s: float
+    decrypt_stats: dict[str, int] = field(default_factory=dict)
+    extractor: ExtractorResult | None = None
+    attachments_mirrored: int = 0
+    new_rows: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def lines(self) -> list[str]:
+        out: list[str] = []
+        if self.decrypt_stats:
+            parts = ", ".join(f"{k}={v}" for k, v in self.decrypt_stats.items())
+            out.append(f"{'decrypt':<20} {parts}")
+        if self.extractor is not None:
+            r = self.extractor
+            extras = " — " + "; ".join(r.notes) if r.notes else ""
+            out.append(
+                f"{r.name:<20} written={r.rows_written:<8} skipped={r.rows_skipped}{extras}"
+            )
+        if self.attachments_mirrored:
+            out.append(f"{'attachments mirrored':<20} +{self.attachments_mirrored}")
+        if self.new_rows:
+            non_zero = {t: n for t, n in self.new_rows.items() if n > 0}
+            if non_zero:
+                parts = ", ".join(f"+{n} {t}" for t, n in non_zero.items())
+                out.append(f"{'new items':<20} {parts}")
+        return out
+
+
+def run_signal_pipeline(
+    *,
+    paths: Paths,
+    encrypted_backup: Path | None,
+    passphrase: str | None,
+    skip_decrypt: bool = False,
+    keep_decrypted: bool = False,
+    mirror_attachments: bool = True,
+    full_scan: bool = False,
+) -> SignalPipelineSummary:
+    """Decrypt a Signal Android backup and extract into the chatvault archive.
+
+    With ``skip_decrypt`` we look for an already-decrypted bundle at
+    ``cache/staging/signal/`` produced by a prior run.
+    """
+    from .extractors import signal as signal_extractor
+    from .sources.signal.decrypt import decrypt_backup
+
+    paths.ensure()
+    sig_stage = paths.staging_dir / "signal"
+    db_path = sig_stage / "database.sqlite"
+    attachments_dir = sig_stage / "attachments"
+    key_values_path = sig_stage / "key_value.json"
+
+    decrypt_stats: dict[str, int] = {}
+    if not skip_decrypt:
+        if encrypted_backup is None or passphrase is None:
+            msg = (
+                "Signal pipeline needs --backup PATH and --passphrase (or --skip-decrypt "
+                "to reuse cache/staging/signal/)."
+            )
+            raise RuntimeError(msg)
+        sig_stage.mkdir(parents=True, exist_ok=True)
+        result = decrypt_backup(encrypted_backup, passphrase, sig_stage)
+        decrypt_stats = {
+            "statements": result.stats.statements,
+            "attachments": result.stats.attachments,
+            "stickers": result.stats.stickers,
+            "avatars": result.stats.avatars,
+            "skipped_statements": result.stats.skipped_statements,
+        }
+    elif not db_path.exists():
+        msg = f"--skip-decrypt set but no decrypted Signal DB at {db_path}"
+        raise RuntimeError(msg)
+
+    started = time.monotonic()
+    archive = dbmod.init_db(paths.db_path)
+    before = _count_tables(archive, TRACKED_TABLES)
+    try:
+        inp = signal_extractor.SignalExtractInput(
+            db_path=db_path,
+            attachments_dir=attachments_dir,
+            key_values_path=key_values_path,
+            media_out_dir=paths.media_dir,
+        )
+        extractor_result = signal_extractor.extract(inp, archive, full_scan=full_scan)
+
+        mirrored = 0
+        if mirror_attachments:
+            mirrored = signal_extractor.mirror_attachments(
+                attachments_dir, paths.media_dir, archive
+            )
+
+        dbmod.set_state(archive, "signal_last_run_ts", _iso_now())
+        after = _count_tables(archive, TRACKED_TABLES)
+        deltas = {t: after.get(t, 0) - before.get(t, 0) for t in after}
+    finally:
+        archive.close()
+        if not keep_decrypted:
+            with contextlib.suppress(OSError):
+                if db_path.exists():
+                    db_path.unlink()
+
+    return SignalPipelineSummary(
+        duration_s=time.monotonic() - started,
+        decrypt_stats=decrypt_stats,
+        extractor=extractor_result,
+        attachments_mirrored=mirrored,
+        new_rows=deltas,
+    )
+
+
 def run_pipeline(
     *,
     paths: Paths,
