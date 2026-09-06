@@ -17,6 +17,11 @@
 - Every chat and message carries a `source` column naming the app it came
   from, backfilled to `'whatsapp'` for existing rows (schema v4).
 
+- Mirror media into per-chat folders (`<chat-slug>/<file>`) instead of one
+  flat directory; files whose parent message is not known yet are parked
+  in `_orphans/` and re-homed on a later pass. Existing archives keep the
+  flat layout until `chatvault mirror migrate` runs (schema v5).
+
 Initial public release. SQLite schema (`migrations/001_init.sql`),
 incremental extract pipeline, identity resolver with vCard import, the
 usual queries (digest, search, timeline, links, forgotten, members,

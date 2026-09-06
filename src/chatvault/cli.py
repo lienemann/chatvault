@@ -810,8 +810,6 @@ def chat_export(
     ] = True,
 ) -> None:
     """One-shot export of a single chat: digest.md + digest.jsonl + media/ folder."""
-    import os as _os
-
     from .exports.digest import render_digest, render_digest_jsonl
     from .identities import NameResolver
 
@@ -867,14 +865,9 @@ def chat_export(
                 media_missing += 1
                 continue
             dst = media_dir / src.name
-            if dst.exists():
-                continue
-            try:
-                _os.link(src, dst)
-            except OSError:
-                import shutil as _sh
+            from .fs import link_or_copy as _link_or_copy
 
-                _sh.copy2(src, dst)
+            _link_or_copy(src, dst)
             media_copied += 1
 
     console.print(f"[green]✓[/] {title} → {out}")
@@ -1649,15 +1642,42 @@ def mirror_snapshot(
     ] = Path("/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Media"),
 ) -> None:
     """One-off mirror pass: hardlink any new media files into the archive."""
-    from .media_mirror import snapshot_pass
+    from .media_mirror import FlatLayoutBlocked, snapshot_pass
 
     paths = Paths.default()
     conn = _open_db(paths)
     try:
-        result = snapshot_pass(conn, media_root=media_root, archive_root=paths.media_dir)
+        try:
+            result = snapshot_pass(conn, media_root=media_root, archive_root=paths.media_dir)
+        except FlatLayoutBlocked as exc:
+            err_console.print(f"[red]{exc}[/]")
+            raise typer.Exit(code=2) from None
     finally:
         conn.close()
     console.print(f"[green]✓[/] mirrored {result.new_files} new files ({result.bytes:,} bytes)")
+    if result.rehomed_orphans:
+        console.print(f"  re-homed {result.rehomed_orphans} previously orphaned files")
+
+
+@mirror_app.command("migrate")
+def mirror_migrate() -> None:
+    """Move existing flat-layout media into per-chat folders.
+
+    Idempotent: re-running on an already-migrated archive is a no-op. The
+    archive's ``_meta.media_layout`` flips to ``per_chat`` on success.
+    """
+    from .media_mirror import migrate_flat_to_per_chat
+
+    paths = Paths.default()
+    conn = _open_db(paths)
+    try:
+        result = migrate_flat_to_per_chat(conn, archive_root=paths.media_dir)
+    finally:
+        conn.close()
+    console.print(
+        f"[green]✓[/] migrated {result.moved} files into per-chat folders "
+        f"(+{result.orphaned} parked in _orphans/, {result.skipped_missing} missing on disk)"
+    )
 
 
 @mirror_app.command("start")
