@@ -8,6 +8,9 @@
   running build, instead of silently querying columns that may have
   moved (`SchemaTooNewError`, exit code 2).
 
+- Print the running build's version and package path to stderr on every
+  invocation, so a stale copy on `$PATH` is obvious.
+
 Initial public release. SQLite schema (`migrations/001_init.sql`),
 incremental extract pipeline, identity resolver with vCard import, the
 usual queries (digest, search, timeline, links, forgotten, members,

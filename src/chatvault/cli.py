@@ -118,11 +118,25 @@ def _open_db(paths: Paths, *, read_only: bool = False) -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 
 
+def _print_banner() -> None:
+    """Print build version + source path to stderr on every invocation.
+
+    Surfaces which copy of the code is running so a stale install on PATH is
+    visible immediately rather than silently using outdated logic against the DB.
+    """
+    pkg_dir = Path(__file__).resolve().parent
+    err_console.print(
+        f"[dim]chatvault {__version__} ({pkg_dir})[/]",
+        highlight=False,
+    )
+
+
 @app.callback()
 def _main(
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Verbose logging")] = False,
 ) -> None:
     _setup_logging(verbose)
+    _print_banner()
 
 
 @app.command()
