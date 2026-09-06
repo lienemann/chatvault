@@ -76,6 +76,23 @@ class NameResolver:
         self, conn: sqlite3.Connection, *, owner_label_fallback: str | None = None
     ) -> None:
         contacts = {r[0]: r[1] for r in conn.execute("SELECT phone_jid, name FROM contacts")}
+        # Fall back to the last known name for contacts that the user has since
+        # deleted from their address book: the live `contacts` row is gone, but
+        # `contacts_history` keeps every `set`. Live rows win when both exist.
+        historic_contacts = {
+            r[0]: r[1]
+            for r in conn.execute(
+                "SELECT h.phone_jid, h.name "
+                "  FROM contacts_history h "
+                "  JOIN ("
+                "    SELECT phone_jid, MAX(id) AS max_id"
+                "      FROM contacts_history WHERE op = 'set' AND name IS NOT NULL"
+                "      GROUP BY phone_jid"
+                "  ) latest ON latest.max_id = h.id"
+            )
+        }
+        for jid, name in historic_contacts.items():
+            contacts.setdefault(jid, name)
         lid_to_phone = {
             r[0]: r[1] for r in conn.execute("SELECT lid_jid, phone_jid FROM identity_links")
         }

@@ -11,6 +11,9 @@
 - Print the running build's version and package path to stderr on every
   invocation, so a stale copy on `$PATH` is obvious.
 
+- Keep resolving names for contacts deleted from the address book, using
+  the last `set` row in `contacts_history` as a fallback.
+
 Initial public release. SQLite schema (`migrations/001_init.sql`),
 incremental extract pipeline, identity resolver with vCard import, the
 usual queries (digest, search, timeline, links, forgotten, members,
