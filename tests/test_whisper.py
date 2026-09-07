@@ -109,6 +109,30 @@ def test_resolve_audio_path_prefers_mirror(tmp_path: Path, paths: Paths) -> None
     assert found == mirror_file
 
 
+def test_resolve_audio_path_survives_unreadable_live_root(
+    monkeypatch: pytest.MonkeyPatch, paths: Paths
+) -> None:
+    """An un-granted /sdcard raises on stat; that must read as "not here", not blow up."""
+    real_exists = Path.exists
+
+    def exploding_exists(self: Path) -> bool:
+        if "denied" in str(self):
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_exists(self)
+
+    monkeypatch.setattr(Path, "exists", exploding_exists)
+    row = wh.AudioRow(
+        message_id="m1",
+        chat_jid="c",
+        ts="2026-01-01T00:00:00Z",
+        file_path="Media/WhatsApp Voice Notes/x.opus",
+        mirrored_path=None,
+        mime="audio/ogg",
+        duration_s=1,
+    )
+    assert wh.resolve_audio_path(row, paths, live_root=Path("/denied")) is None
+
+
 def test_strip_timestamps_removes_brackets() -> None:
     raw = "[00:00:00.000 --> 00:00:02.500]  Hallo,\n[00:00:02.500 --> 00:00:04.000]  wie geht's?\n"
     assert wh._strip_timestamps(raw) == "Hallo,\nwie geht's?"

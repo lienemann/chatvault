@@ -38,6 +38,9 @@
   already archived message, both via the new full-sweep `translations`
   extractor.
 
+- Skip audio files whose path cannot be stat'ed (an un-granted /sdcard, a
+  foreign app directory) instead of aborting the transcribe run.
+
 Initial public release. SQLite schema (`migrations/001_init.sql`),
 incremental extract pipeline, identity resolver with vCard import, the
 usual queries (digest, search, timeline, links, forgotten, members,

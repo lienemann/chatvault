@@ -158,22 +158,37 @@ def _subprocess_env_for(tool: str) -> dict[str, str] | None:
     return env
 
 
+def _readable(path: Path) -> bool:
+    """``path.exists()`` that treats an unreadable path as absent.
+
+    Android hands out media roots we may not be allowed to stat — an un-granted
+    /sdcard, another app's private directory — and `exists()` raises there
+    instead of returning False. Either way the file is unusable for us, so the
+    caller should move on to the next candidate location.
+    """
+    try:
+        return path.exists()
+    except OSError as exc:
+        log.debug("cannot stat %s: %s", path, exc)
+        return False
+
+
 def resolve_audio_path(row: AudioRow, paths: Paths, live_root: Path | None) -> Path | None:
     """Find the on-disk audio file. Mirror copy wins; falls back to live source."""
     if row.mirrored_path:
         p = Path(row.mirrored_path)
-        if p.exists():
+        if _readable(p):
             return p
     rel = row.file_path
     if rel:
         # Mirror layout strips the leading "Media/" segment.
         mirror_rel = rel[len(_MEDIA_PREFIX) :] if rel.startswith(_MEDIA_PREFIX) else rel
         mirror = paths.media_dir / mirror_rel
-        if mirror.exists():
+        if _readable(mirror):
             return mirror
         if live_root is not None:
             live = live_root / mirror_rel
-            if live.exists():
+            if _readable(live):
                 return live
     return None
 
