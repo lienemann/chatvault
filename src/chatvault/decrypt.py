@@ -1,7 +1,9 @@
 """Wrapper for decrypting WA backup files into a plain msgstore.db.
 
-This calls the `wa-crypt-tools` CLI as a subprocess, so the heavy crypto stays in
-that audited project. We provide a clean Python API and consistent error types.
+This runs `wa-crypt-tools` as a subprocess, so the heavy crypto stays in that
+audited project. We provide a clean Python API and consistent error types.
+Preferred form is `python -m wa_crypt_tools.wadecrypt` with our own interpreter,
+falling back to the `wadecrypt` console script on PATH.
 
 The CLI accepts either a Java-keystore-format key file or the raw 64-character
 hex key as a positional argument. chatvault stores the hex key in
@@ -10,9 +12,11 @@ hex key as a positional argument. chatvault stores the hex key in
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,13 +36,32 @@ class DecryptResult:
     bytes_written: int
 
 
-def _find_decrypt_binary() -> str:
-    """Locate the `wadecrypt` (or compatible) CLI."""
+def _module_available() -> bool:
+    """Whether `wa_crypt_tools` is importable by the interpreter we run under."""
+    try:
+        return importlib.util.find_spec("wa_crypt_tools") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _decrypt_command() -> list[str]:
+    """Build the wa-crypt-tools invocation, preferring `-m` over a console script.
+
+    pip bakes the absolute path of the installing interpreter into a console
+    script's shebang, so `wadecrypt` stops working the moment that Python is
+    removed — a routine Python minor upgrade breaks it. Running the module with
+    our own `sys.executable` has no shebang to rot. The PATH lookup stays as a
+    fallback for installs that are not visible to this interpreter (a global
+    `uv tool install`, say).
+    """
+    if _module_available():
+        return [sys.executable, "-m", "wa_crypt_tools.wadecrypt"]
     for candidate in ("wadecrypt", "wadecryptgui", "wa-crypt-tools"):
-        if shutil.which(candidate):
-            return candidate
+        found = shutil.which(candidate)
+        if found:
+            return [found]
     msg = (
-        "wa-crypt-tools not on PATH. Install with `pip install wa-crypt-tools` or "
+        "wa-crypt-tools not installed. Install with `pip install wa-crypt-tools` or "
         "`uv tool install wa-crypt-tools`."
     )
     raise DecryptError(msg)
@@ -76,14 +99,14 @@ def decrypt(
         output.unlink()
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    binary = _find_decrypt_binary()
+    command = _decrypt_command()
 
     log.info("Decrypting %s → %s", encrypted, output)
     # Passing the hex key as the positional `keyfile` arg — wa-crypt-tools
     # accepts either a key-file or a hex string in that slot.
     try:
         proc = subprocess.run(
-            [binary, hex_key, str(encrypted), str(output)],
+            [*command, hex_key, str(encrypted), str(output)],
             capture_output=True,
             text=True,
             check=False,
@@ -93,7 +116,7 @@ def decrypt(
         # script whose shebang points at a since-removed interpreter gets this far
         # and fails at exec time. Report that instead of a bare FileNotFoundError.
         msg = (
-            f"found {binary} but could not run it ({exc}). The installed "
+            f"found {command[0]} but could not run it ({exc}). The installed "
             "wa-crypt-tools may target an old Python; reinstall it."
         )
         raise DecryptError(msg) from exc
