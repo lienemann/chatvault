@@ -81,12 +81,22 @@ def decrypt(
     log.info("Decrypting %s → %s", encrypted, output)
     # Passing the hex key as the positional `keyfile` arg — wa-crypt-tools
     # accepts either a key-file or a hex string in that slot.
-    proc = subprocess.run(
-        [binary, hex_key, str(encrypted), str(output)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            [binary, hex_key, str(encrypted), str(output)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        # `shutil.which` only checks that the file exists and is executable, so a
+        # script whose shebang points at a since-removed interpreter gets this far
+        # and fails at exec time. Report that instead of a bare FileNotFoundError.
+        msg = (
+            f"found {binary} but could not run it ({exc}). The installed "
+            "wa-crypt-tools may target an old Python; reinstall it."
+        )
+        raise DecryptError(msg) from exc
     if proc.returncode != 0:
         msg = (
             f"decrypt failed (exit {proc.returncode}): {proc.stderr.strip() or proc.stdout.strip()}"
